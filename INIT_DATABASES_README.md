@@ -1,315 +1,73 @@
-# NewBee 微服务数据库迁移工具使用说明
+# 新蜂资产管理平台数据库初始化
 
-## 工具简介
+平台主数据库使用 MySQL。仓库提供 Ent Schema 和基础数据初始化逻辑，不需要导入本机数据库备份。初始化工具调用已运行的 RPC 服务，不负责创建 MySQL 实例、数据库或服务账号，也不负责启动服务。
 
-`init-databases.sh` 是一个统一的数据库初始化工具，用于批量调用各个微服务的RPC `initDatabase` 接口进行数据库迁移。
+完整首次部署步骤见 [空库部署说明](docs/deployment.md)。已有环境升级前应备份数据库并审查 Schema 差异。
 
-## 功能特性
+## 使用前准备
 
-- ✅ 自动发现并调用所有微服务的initDatabase接口
-- ✅ 智能检测服务是否在线
-- ✅ 支持单个或批量初始化
-- ✅ 彩色输出，清晰显示执行状态
-- ✅ 统计报告，展示成功/失败/跳过数量
-
-## 前置要求
-
-1. **grpcurl工具** - 用于调用gRPC接口
-   ```bash
-   # 如果未安装，执行：
-   go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
-   ```
-
-2. **微服务运行** - 需要初始化的微服务必须处于运行状态
-   ```bash
-   # 示例：启动core服务
-   cd /opt/code/newbee/core/rpc
-   go run core.go
-   ```
-
-## 使用方法
-
-### 1. 初始化所有微服务
+1. 递归克隆工作区：`git submodule update --init --recursive`。
+2. 创建空的 `newbee` 数据库和专用账号，准备 Redis。
+3. 复制每个服务的 `*.yaml.example`，填写本环境数据库、Redis、JWT、服务地址等配置。
+4. 启动 Core RPC，并将初始化阶段的服务端 `Timeout` 设为 `300000` 毫秒。
+5. 安装 Bash 和 grpcurl。脚本显式指定仓库内 proto，不依赖服务端反射，也不依赖 netcat。
 
 ```bash
-# 在项目根目录执行
-./init-databases.sh
+go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3
+bash init-databases.sh --list
+bash init-databases.sh --dry-run -s core
+bash init-databases.sh -s core
 ```
 
-输出示例：
-```
-============================================
-  NewBee 微服务数据库迁移工具
-============================================
-
-[SUCCESS] grpcurl 已安装
-
-==> 初始化 core 数据库
-[INFO] core 服务在线，开始初始化数据库...
-[SUCCESS] core 数据库初始化成功
-    响应: {"msg": "database initialized successfully"}
-
-==> 初始化 cmdb 数据库
-[WARNING] cmdb 服务未运行 (127.0.0.1:9200)，跳过
-
-==> 初始化 unified-io 数据库
-[INFO] unified-io 服务在线，开始初始化数据库...
-[SUCCESS] unified-io 数据库初始化成功
-    响应: {"msg": "database initialized successfully"}
-
-============================================
-  初始化结果统计
-============================================
-总服务数: 4
-成功: 2
-跳过: 2
-失败: 0
-============================================
-```
-
-### 2. 初始化单个微服务
+Core 初始化成功后，再启动 CMDB、Ops、IO 和 Job RPC，随后初始化这些服务。Core API 和其他 API 在相应数据库初始化成功后启动。
 
 ```bash
-# 只初始化core服务
-./init-databases.sh -s core
-
-# 只初始化ops-center服务
-./init-databases.sh -s ops-center
+bash init-databases.sh -s cmdb -s ops-center -s unified-io -s job
 ```
 
-### 3. 查看支持的服务列表
+若所有 RPC 已经运行，可一次初始化：
 
 ```bash
-./init-databases.sh --list
+bash init-databases.sh
 ```
 
-输出：
-```
-支持的微服务:
-  - core (端口: 9100, 包: core, 服务: Core)
-  - cmdb (端口: 9200, 包: cmdb, 服务: Cmdb)
-  - unified-io (端口: 9500, 包: io, 服务: Io)
-  - ops-center (端口: 9600, 包: ops, 服务: Ops)
-```
+## 服务与调用顺序
 
-### 4. 查看帮助信息
+| 服务 | 默认地址         | RPC 方法                 | 初始化内容                                               |
+| ---- | ---------------- | ------------------------ | -------------------------------------------------------- |
+| Core | `127.0.0.1:9100` | `core.Core/initDatabase` | 系统表、默认租户、管理员、角色、菜单、接口及权限基础数据 |
+| CMDB | `127.0.0.1:9200` | `cmdb.Cmdb/initDatabase` | 资产表、基础模型和属性、Core 菜单及接口目录              |
+| Ops  | `127.0.0.1:9600` | `ops.Ops/initDatabase`   | 运维表、Core 菜单及接口目录                              |
+| IO   | `127.0.0.1:9500` | `io.Io/initDatabase`     | 接入表、Provider 目录、Core 菜单及接口目录               |
+| Job  | `127.0.0.1:9105` | `job.Job/initDatabase`   | 定时任务与日志表；不创建或执行任务                       |
+
+选择多个服务时，脚本保持上述依赖顺序并去重。Core 初始化失败会停止后续调用；其他 RPC 失败或不可达会计入失败，最终返回非零状态，不能视为成功。
+
+CMDB、Ops、IO 的目录登记使用默认租户 `1`，并合并其 `superadmin` 的菜单授权；不会授权普通角色。Core 未初始化、未配置 Core RPC 或目录登记失败时，初始化会返回错误。默认租户不是 `1` 的已有环境不适用首次部署步骤。
+
+## 修改地址和超时
 
 ```bash
-./init-databases.sh --help
+NEWBEE_CORE_RPC=127.0.0.1:19100 \
+NEWBEE_CMDB_RPC=127.0.0.1:19200 \
+NEWBEE_OPS_RPC=127.0.0.1:19600 \
+NEWBEE_IO_RPC=127.0.0.1:19500 \
+NEWBEE_JOB_RPC=127.0.0.1:19105 \
+bash init-databases.sh
 ```
 
-## 支持的微服务
+`GRPCURL` 可指定工具路径；`NEWBEE_INIT_TIMEOUT` 为客户端超时秒数，默认 `300`。服务端 `Timeout` 独立生效，客户端参数不能覆盖它。
 
-| 服务名 | RPC端口 | Proto包 | Proto服务 | 说明 |
-|--------|---------|---------|-----------|------|
-| core | 9100 | core | Core | 核心服务（用户、角色、权限等） |
-| cmdb | 9200 | cmdb | Cmdb | 配置管理数据库 |
-| unified-io | 9500 | io | Io | 统一数据输入输出服务 |
-| ops-center | 9600 | ops | Ops | 运维中心服务 |
+初始化阶段关闭 Ops 的 `WorkerManager.Enabled`、IO 的 `TaskWorker.Enabled` 和 Job 的 `AsynqConf.Enable`、`TaskConf.EnableDPTask`、`TaskConf.EnableScheduledTask`。这些开关在模板中默认关闭；建表成功后可以启用 Ops Worker 恢复并重启 RPC，确认任务配置后再按需启用 IO 和 Job 后台任务。
 
-## 使用场景
+重复初始化保留已有业务记录、列和索引，菜单和接口目录按现有记录复用。Core 已存在接口数据时会跳过基础数据插入，因此该入口不能替代完整的数据修复或正式版本迁移。Core 调用超时后后台初始化可能继续，先检查日志和结果，再决定是否重试。
 
-### 场景1：修改了Schema，需要迁移数据库
+## 回归检查
+
+脚本测试用模拟 RPC，不连接数据库：
 
 ```bash
-# 1. 修改 ent schema
-vim core/rpc/ent/schema/user.go
-
-# 2. 生成ent代码
-cd core/rpc
-make gen-rpc
-
-# 3. 重启RPC服务
-./core
-
-# 4. 执行数据库迁移
-cd /opt/code/newbee
-./init-databases.sh -s core
+python scripts/tests/test_init_databases.py
 ```
 
-### 场景2：全新部署，需要初始化所有数据库
-
-```bash
-# 1. 启动所有微服务
-./start-all-services.sh  # 假设有这个脚本
-
-# 2. 执行全部初始化
-./init-databases.sh
-```
-
-### 场景3：添加新的微服务
-
-如果新增了微服务（例如 `fms`），需要修改脚本添加配置：
-
-```bash
-# 编辑 init-databases.sh
-vim init-databases.sh
-
-# 在SERVICES数组中添加：
-SERVICES=(
-    "core:9100:core:Core"
-    "cmdb:9200:cmdb:Cmdb"
-    "unified-io:9500:io:Io"
-    "ops-center:9600:ops:Ops"
-    "fms:9102:fms:Fms"  # 新增
-)
-```
-
-## 错误处理
-
-### 错误1：grpcurl未安装
-
-**错误信息**：
-```
-[ERROR] grpcurl 未安装，请先安装: go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
-```
-
-**解决方法**：
-```bash
-go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
-```
-
-### 错误2：服务未运行
-
-**错误信息**：
-```
-[WARNING] core 服务未运行 (127.0.0.1:9100)，跳过
-```
-
-**解决方法**：
-```bash
-# 启动对应服务
-cd /opt/code/newbee/core/rpc
-go run core.go
-```
-
-### 错误3：数据库连接失败
-
-**错误信息**：
-```
-[ERROR] core 数据库初始化失败
-    错误: rpc error: code = Unavailable desc = connection error
-```
-
-**解决方法**：
-1. 检查数据库是否运行
-2. 检查配置文件中的数据库连接信息
-3. 检查网络连接
-
-### 错误4：权限不足
-
-**错误信息**：
-```
-bash: ./init-databases.sh: Permission denied
-```
-
-**解决方法**：
-```bash
-chmod +x init-databases.sh
-```
-
-## 工作原理
-
-1. **服务发现**：使用 `nc` 命令检测服务端口是否可达
-2. **gRPC调用**：使用 `grpcurl` 工具调用各服务的 `initDatabase` 方法
-3. **状态跟踪**：记录成功、失败、跳过的服务数量
-4. **结果统计**：最后输出汇总报告
-
-## 注意事项
-
-⚠️ **重要提醒**：
-
-1. **数据安全**：`initDatabase` 接口会执行数据库迁移操作，可能会修改数据库结构。生产环境使用前请务必备份数据库。
-
-2. **服务顺序**：建议按以下顺序初始化：
-   - 第一步：`core` （核心服务，包含基础数据）
-   - 第二步：其他服务（`cmdb`, `unified-io`, `ops-center`）
-
-3. **依赖关系**：某些服务可能依赖其他服务的数据，注意初始化顺序。
-
-4. **幂等性**：`initDatabase` 接口应该是幂等的，重复调用不会造成问题。
-
-5. **超时设置**：大型数据库迁移可能需要较长时间，注意调整RPC超时配置。
-
-## 进阶用法
-
-### 自定义超时时间
-
-如果迁移时间较长，可以修改各服务的配置文件：
-
-```yaml
-# core/rpc/etc/core.yaml
-Timeout: 60000  # 60秒超时，单位：毫秒
-```
-
-### 并行执行（高级）
-
-默认是串行执行，如果需要并行可以修改脚本：
-
-```bash
-# 在脚本中添加后台执行
-init_database "$service_name" "$port" "$package" "$proto_service" &
-```
-
-⚠️ 注意：并行执行可能导致数据库死锁，不推荐使用。
-
-## 扩展开发
-
-### 添加新的微服务
-
-1. 在 `SERVICES` 数组中添加配置
-2. 确保新服务的proto中定义了 `initDatabase` 方法
-3. 测试脚本执行
-
-### 集成到CI/CD
-
-```yaml
-# .gitlab-ci.yml 示例
-deploy:
-  script:
-    - ./deploy.sh
-    - ./init-databases.sh
-    - echo "Database migration completed"
-```
-
-## 常见问题（FAQ）
-
-**Q1: 可以多次执行吗？**
-
-A: 可以。`initDatabase` 接口应该是幂等的，多次执行不会造成问题。
-
-**Q2: 是否支持回滚？**
-
-A: 不支持。如需回滚，请使用数据库备份恢复。
-
-**Q3: 如何查看详细的日志？**
-
-A: 查看各服务的日志文件，路径在配置文件中定义（例如 `/home/data/logs/core/rpc`）。
-
-**Q4: 可以远程执行吗？**
-
-A: 可以。修改脚本中的 `127.0.0.1` 为远程服务器IP，但需要确保网络连通。
-
-## 维护指南
-
-- **定期检查**：确保grpcurl工具是最新版本
-- **更新配置**：新增微服务时及时更新 `SERVICES` 数组
-- **日志清理**：定期清理老旧的日志文件
-- **权限管理**：确保脚本有执行权限
-
-## 版本历史
-
-- **v1.0.0** (2025-01-15)
-  - 初始版本
-  - 支持4个微服务（core, cmdb, unified-io, ops-center）
-  - 基础功能：批量初始化、单个初始化、列表查看
-
-## 技术支持
-
-如有问题，请联系：
-- 项目维护者
-- 查看项目文档：`/opt/code/newbee/CLAUDE.md`
-
----
-
-**祝使用愉快！** 🚀
+Windows 可通过环境变量 `NEWBEE_TEST_BASH` 指定 Git Bash 的完整路径。测试产物放在忽略的 `logs/clone-deploy/tests/`。
