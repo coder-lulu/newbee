@@ -1,0 +1,594 @@
+# NewBee Core服务中间件性能监控仪表板配置
+# 适用于Prometheus + Grafana监控栈
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: newbee-middleware-monitoring
+  labels:
+    app: newbee-core
+    component: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    rule_files:
+      - "middleware_alerts.yml"
+
+    scrape_configs:
+      # NewBee Core服务指标采集
+      - job_name: 'newbee-core-middleware'
+        static_configs:
+          - targets: ['newbee-core:8080']
+        metrics_path: '/metrics'
+        scrape_interval: 10s
+        scrape_timeout: 5s
+        
+      # Redis性能监控
+      - job_name: 'redis-middleware'
+        static_configs:
+          - targets: ['redis:6379']
+        metrics_path: '/metrics'
+        scrape_interval: 30s
+
+      # 数据库性能监控
+      - job_name: 'postgres-middleware' 
+        static_configs:
+          - targets: ['postgres-exporter:9187']
+        metrics_path: '/metrics'
+        scrape_interval: 30s
+
+  middleware_alerts.yml: |
+    groups:
+    - name: middleware_performance
+      rules:
+      # 中间件延迟告警
+      - alert: MiddlewareHighLatency
+        expr: histogram_quantile(0.99, rate(newbee_middleware_request_duration_seconds_bucket[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          component: middleware
+        annotations:
+          summary: "中间件延迟过高"
+          description: "{{ $labels.middleware }} P99延迟 {{ $value }}秒，超过100ms阈值"
+
+      # 错误率告警
+      - alert: MiddlewareHighErrorRate
+        expr: (rate(newbee_middleware_requests_total{status=~"4..|5.."}[5m]) / rate(newbee_middleware_requests_total[5m])) > 0.05
+        for: 1m
+        labels:
+          severity: critical
+          component: middleware
+        annotations:
+          summary: "中间件错误率过高"
+          description: "{{ $labels.middleware }} 错误率 {{ $value | humanizePercentage }}，超过5%阈值"
+
+      # 缓存命中率告警
+      - alert: CacheHitRateLow
+        expr: (rate(newbee_middleware_cache_hits_total[5m]) / rate(newbee_middleware_cache_requests_total[5m])) < 0.7
+        for: 5m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "缓存命中率过低"
+          description: "{{ $labels.middleware }} 缓存命中率 {{ $value | humanizePercentage }}，低于70%阈值"
+
+      # 内存使用告警
+      - alert: MiddlewareHighMemoryUsage
+        expr: newbee_middleware_memory_usage_bytes / 1024 / 1024 > 500
+        for: 3m
+        labels:
+          severity: warning
+          component: memory
+        annotations:
+          summary: "中间件内存使用过高"
+          description: "{{ $labels.middleware }} 内存使用 {{ $value }}MB，超过500MB阈值"
+
+      # Goroutine泄露告警
+      - alert: GoroutineLeakDetected
+        expr: go_goroutines > 1000
+        for: 5m
+        labels:
+          severity: critical
+          component: goroutine
+        annotations:
+          summary: "检测到Goroutine泄露"
+          description: "Goroutine数量 {{ $value }}，超过1000阈值，可能存在泄露"
+
+      # 熔断器开启告警
+      - alert: CircuitBreakerOpen
+        expr: newbee_middleware_circuit_breaker_state > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: circuit_breaker
+        annotations:
+          summary: "熔断器开启"
+          description: "{{ $labels.middleware }} {{ $labels.breaker }}熔断器已开启"
+
+  grafana_dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "NewBee中间件性能监控",
+        "tags": ["newbee", "middleware", "performance"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "请求吞吐量(QPS)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(newbee_middleware_requests_total[1m])) by (middleware)",
+                "legendFormat": "{{ middleware }}"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Requests/sec",
+                "min": 0
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+          },
+          {
+            "id": 2, 
+            "title": "响应延迟分布",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.50, sum(rate(newbee_middleware_request_duration_seconds_bucket[5m])) by (le, middleware))",
+                "legendFormat": "{{ middleware }} P50"
+              },
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(newbee_middleware_request_duration_seconds_bucket[5m])) by (le, middleware))",
+                "legendFormat": "{{ middleware }} P95"
+              },
+              {
+                "expr": "histogram_quantile(0.99, sum(rate(newbee_middleware_request_duration_seconds_bucket[5m])) by (le, middleware))",
+                "legendFormat": "{{ middleware }} P99"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Latency (seconds)",
+                "min": 0
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+          },
+          {
+            "id": 3,
+            "title": "错误率",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "sum(rate(newbee_middleware_requests_total{status=~\"4..|5..\"}[5m])) / sum(rate(newbee_middleware_requests_total[5m]))",
+                "legendFormat": "总体错误率"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percentunit",
+                "thresholds": {
+                  "steps": [
+                    {"color": "green", "value": null},
+                    {"color": "yellow", "value": 0.01},
+                    {"color": "red", "value": 0.05}
+                  ]
+                }
+              }
+            },
+            "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8}
+          },
+          {
+            "id": 4,
+            "title": "缓存命中率",
+            "type": "stat", 
+            "targets": [
+              {
+                "expr": "sum(rate(newbee_middleware_cache_hits_total[5m])) / sum(rate(newbee_middleware_cache_requests_total[5m]))",
+                "legendFormat": "L1缓存命中率"
+              },
+              {
+                "expr": "sum(rate(newbee_middleware_redis_hits_total[5m])) / sum(rate(newbee_middleware_redis_requests_total[5m]))",
+                "legendFormat": "Redis缓存命中率"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percentunit",
+                "min": 0,
+                "max": 1,
+                "thresholds": {
+                  "steps": [
+                    {"color": "red", "value": null},
+                    {"color": "yellow", "value": 0.7},
+                    {"color": "green", "value": 0.85}
+                  ]
+                }
+              }
+            },
+            "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8}
+          },
+          {
+            "id": 5,
+            "title": "内存使用",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "newbee_middleware_memory_usage_bytes / 1024 / 1024",
+                "legendFormat": "{{ middleware }} 内存使用(MB)"
+              },
+              {
+                "expr": "go_memstats_heap_inuse_bytes / 1024 / 1024",
+                "legendFormat": "Go堆内存(MB)"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Memory (MB)",
+                "min": 0
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+          },
+          {
+            "id": 6,
+            "title": "连接池状态",
+            "type": "graph", 
+            "targets": [
+              {
+                "expr": "newbee_middleware_redis_pool_total_conns",
+                "legendFormat": "Redis总连接数"
+              },
+              {
+                "expr": "newbee_middleware_redis_pool_idle_conns",
+                "legendFormat": "Redis空闲连接数"
+              },
+              {
+                "expr": "newbee_middleware_db_pool_open_conns",
+                "legendFormat": "DB开放连接数"
+              },
+              {
+                "expr": "newbee_middleware_db_pool_idle_conns",
+                "legendFormat": "DB空闲连接数"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Connections",
+                "min": 0
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+          },
+          {
+            "id": 7,
+            "title": "Goroutine数量",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "go_goroutines",
+                "legendFormat": "Goroutine总数"
+              },
+              {
+                "expr": "newbee_middleware_async_goroutines",
+                "legendFormat": "异步处理Goroutine"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Count",
+                "min": 0
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+          },
+          {
+            "id": 8,
+            "title": "GC性能",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(go_gc_duration_seconds_sum[5m]) / rate(go_gc_duration_seconds_count[5m])",
+                "legendFormat": "平均GC暂停时间"
+              },
+              {
+                "expr": "rate(go_gc_duration_seconds_count[5m])",
+                "legendFormat": "GC频率(/sec)"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Duration (seconds)",
+                "min": 0
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+          },
+          {
+            "id": 9,
+            "title": "熔断器状态",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "newbee_middleware_circuit_breaker_state",
+                "legendFormat": "{{ middleware }}-{{ breaker }} 熔断器状态"
+              },
+              {
+                "expr": "rate(newbee_middleware_circuit_breaker_total[5m])",
+                "legendFormat": "{{ middleware }}-{{ breaker }} 熔断次数"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "State/Count",
+                "min": 0
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+          }
+        ],
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "refresh": "30s"
+      }
+    }
+
+---
+# 性能基准测试配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: performance-benchmark-config
+data:
+  benchmark.yaml: |
+    # 性能基准测试配置
+    scenarios:
+      # JWT认证性能测试
+      - name: jwt_auth_benchmark
+        description: "JWT认证中间件性能基准测试"
+        target: "http://newbee-core:8080/api/auth/test"
+        duration: "5m"
+        users: 100
+        requests_per_second: 1000
+        headers:
+          Authorization: "Bearer ${JWT_TOKEN}"
+        
+        assertions:
+          - metric: "response_time_p95"
+            operator: "<"
+            value: 50ms
+          - metric: "response_time_p99" 
+            operator: "<"
+            value: 100ms
+          - metric: "error_rate"
+            operator: "<"
+            value: 1%
+
+      # 数据权限性能测试
+      - name: data_permission_benchmark
+        description: "数据权限中间件性能基准测试"
+        target: "http://newbee-core:8080/api/users"
+        duration: "5m"
+        users: 50
+        requests_per_second: 500
+        headers:
+          Authorization: "Bearer ${JWT_TOKEN}"
+          
+        assertions:
+          - metric: "response_time_p95"
+            operator: "<"
+            value: 100ms
+          - metric: "cache_hit_rate"
+            operator: ">"
+            value: 80%
+
+      # 并发压力测试
+      - name: concurrent_stress_test
+        description: "高并发压力测试"
+        target: "http://newbee-core:8080/api/benchmark"
+        duration: "10m"
+        users: 500
+        requests_per_second: 5000
+        headers:
+          Authorization: "Bearer ${JWT_TOKEN}"
+          
+        assertions:
+          - metric: "response_time_p99"
+            operator: "<"
+            value: 500ms
+          - metric: "throughput"
+            operator: ">"
+            value: 4000
+
+    # 性能基线定义
+    baselines:
+      jwt_auth:
+        p50_latency: 1ms
+        p99_latency: 10ms
+        max_memory: 100MB
+        min_throughput: 10000
+        
+      data_permission:
+        p50_latency: 2ms
+        p99_latency: 20ms
+        cache_hit_rate: 80%
+        max_memory: 50MB
+
+      system_resources:
+        max_cpu_usage: 80%
+        max_memory_usage: 1GB
+        max_goroutines: 500
+        max_gc_pause: 10ms
+
+  load_test.sh: |
+    #!/bin/bash
+    # NewBee中间件负载测试脚本
+    
+    set -e
+    
+    # 配置变量
+    BASE_URL="${BASE_URL:-http://localhost:8080}"
+    JWT_TOKEN="${JWT_TOKEN:-default_test_token}"
+    DURATION="${DURATION:-300s}"
+    
+    echo "开始NewBee中间件性能测试..."
+    echo "目标URL: $BASE_URL"
+    echo "测试时长: $DURATION"
+    
+    # 1. JWT认证性能测试
+    echo "1. 执行JWT认证性能测试..."
+    wrk -t12 -c100 -d$DURATION \
+        -H "Authorization: Bearer $JWT_TOKEN" \
+        --script=jwt_auth_test.lua \
+        $BASE_URL/api/auth/test
+    
+    # 2. 数据权限性能测试
+    echo "2. 执行数据权限性能测试..."
+    wrk -t8 -c50 -d$DURATION \
+        -H "Authorization: Bearer $JWT_TOKEN" \
+        --script=data_perm_test.lua \
+        $BASE_URL/api/users
+    
+    # 3. 租户隔离性能测试
+    echo "3. 执行租户隔离性能测试..."
+    wrk -t10 -c80 -d$DURATION \
+        -H "Authorization: Bearer $JWT_TOKEN" \
+        -H "X-Tenant-ID: 123" \
+        --script=tenant_test.lua \
+        $BASE_URL/api/tenant/test
+    
+    # 4. 综合压力测试
+    echo "4. 执行综合压力测试..."
+    wrk -t16 -c200 -d$DURATION \
+        -H "Authorization: Bearer $JWT_TOKEN" \
+        --script=stress_test.lua \
+        $BASE_URL/api/stress
+    
+    echo "性能测试完成！请查看生成的报告文件。"
+
+  jwt_auth_test.lua: |
+    -- JWT认证性能测试脚本
+    
+    local jwt_tokens = {
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test1",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test2", 
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test3"
+    }
+    
+    local counter = 0
+    
+    request = function()
+        counter = counter + 1
+        local token = jwt_tokens[(counter % #jwt_tokens) + 1]
+        
+        wrk.headers["Authorization"] = "Bearer " .. token
+        wrk.headers["Content-Type"] = "application/json"
+        wrk.headers["User-Agent"] = "wrk-jwt-test"
+        
+        return wrk.format("GET", wrk.path)
+    end
+    
+    response = function(status, headers, body)
+        if status ~= 200 then
+            print("Error response: " .. status)
+        end
+    end
+
+  monitoring_setup.sh: |
+    #!/bin/bash
+    # 监控系统部署脚本
+    
+    set -e
+    
+    echo "部署NewBee中间件监控系统..."
+    
+    # 1. 部署Prometheus
+    kubectl apply -f - <<EOF
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: prometheus
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: prometheus
+      template:
+        metadata:
+          labels:
+            app: prometheus
+        spec:
+          containers:
+          - name: prometheus
+            image: prom/prometheus:latest
+            ports:
+            - containerPort: 9090
+            volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+          volumes:
+          - name: config
+            configMap:
+              name: newbee-middleware-monitoring
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: prometheus
+    spec:
+      ports:
+      - port: 9090
+      selector:
+        app: prometheus
+    EOF
+    
+    # 2. 部署Grafana
+    kubectl apply -f - <<EOF
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: grafana
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: grafana
+      template:
+        metadata:
+          labels:
+            app: grafana
+        spec:
+          containers:
+          - name: grafana
+            image: grafana/grafana:latest
+            ports:
+            - containerPort: 3000
+            env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: "admin123"
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: grafana
+    spec:
+      type: LoadBalancer
+      ports:
+      - port: 3000
+      selector:
+        app: grafana
+    EOF
+    
+    echo "监控系统部署完成！"
+    echo "Prometheus: http://prometheus:9090"
+    echo "Grafana: http://grafana:3000 (admin/admin123)"

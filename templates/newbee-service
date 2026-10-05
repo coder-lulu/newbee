@@ -1,0 +1,504 @@
+#!/bin/bash
+
+# NewBee 引导式服务创建器
+# 一步一步引导创建微服务
+
+set -e
+
+VERSION="2.1.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE_DIR="$SCRIPT_DIR/service-template"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+CONFIG_FILE="$PROJECT_ROOT/.newbee-services.json"
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# 图标
+SUCCESS="✅"
+ERROR="❌"
+INFO="💡"
+STEP="🔹"
+ROCKET="🚀"
+DATABASE="🗄️"
+NETWORK="🌐"
+
+# 全局变量
+SERVICE_NAME=""
+DATABASE_NAME=""
+DB_HOST="192.168.26.130"
+REDIS_HOST="192.168.26.130:6380"
+API_PORT=""
+RPC_PORT=""
+CORE_RPC_TARGET="127.0.0.1:9101"
+
+# 工具函数
+print_header() {
+    clear
+    echo -e "${CYAN}${BOLD}"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                NewBee 引导式服务创建器                       ║"
+    echo "║                  一步一步创建您的微服务                       ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    echo -e "${DIM}版本: $VERSION | NewBee 微服务架构${NC}"
+    echo ""
+}
+
+print_step() {
+    local step_num=$1
+    local title=$2
+    echo -e "${BLUE}${BOLD}${STEP} 步骤 $step_num/6: $title${NC}"
+    echo ""
+}
+
+print_success() { echo -e "${GREEN}${SUCCESS} $1${NC}"; }
+print_error() { echo -e "${RED}${ERROR} $1${NC}"; }
+print_info() { echo -e "${BLUE}${INFO} $1${NC}"; }
+
+# 验证函数
+validate_service_name() {
+    local name="$1"
+    
+    if [ -z "$name" ]; then
+        echo "服务名称不能为空"
+        return 1
+    fi
+    
+    if [ ${#name} -lt 2 ] || [ ${#name} -gt 20 ]; then
+        echo "服务名称长度必须在 2-20 个字符之间"
+        return 1
+    fi
+    
+    if [[ ! $name =~ ^[a-z][a-z0-9\-]*[a-z0-9]$|^[a-z]$ ]]; then
+        echo "服务名称必须以小写字母开头，只能包含小写字母、数字和连字符"
+        return 1
+    fi
+    
+    local reserved_names=("api" "rpc" "core" "admin" "common")
+    for reserved in "${reserved_names[@]}"; do
+        if [ "$name" = "$reserved" ]; then
+            echo "服务名称 '$name' 是保留名称，请使用其他名称"
+            return 1
+        fi
+    done
+    
+    return 0
+}
+
+validate_port() {
+    local port="$1"
+    
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        echo "端口必须是数字"
+        return 1
+    fi
+    
+    if [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+        echo "端口必须在 1024-65535 之间"
+        return 1
+    fi
+    
+    if netstat -tuln 2>/dev/null | grep -q ":$port " || ss -tuln 2>/dev/null | grep -q ":$port "; then
+        echo "端口 $port 已被占用"
+        return 1
+    fi
+    
+    return 0
+}
+
+# 获取可用端口
+get_available_port() {
+    local start_port=${1:-9600}
+    local port=$start_port
+    
+    while true; do
+        if ! netstat -tuln 2>/dev/null | grep -q ":$port " && ! ss -tuln 2>/dev/null | grep -q ":$port "; then
+            echo $port
+            return
+        fi
+        ((port++))
+        
+        if [ $port -gt $((start_port + 100)) ]; then
+            echo $start_port
+            return
+        fi
+    done
+}
+
+# 输入函数
+read_with_validation() {
+    local prompt="$1"
+    local validator="$2"
+    local default="$3"
+    local value=""
+    
+    while true; do
+        if [ -n "$default" ]; then
+            echo -n "$prompt (默认: $default): "
+        else
+            echo -n "$prompt: "
+        fi
+        
+        read value
+        
+        if [ -z "$value" ] && [ -n "$default" ]; then
+            value="$default"
+        fi
+        
+        if [ -z "$validator" ]; then
+            echo "$value"
+            return 0
+        fi
+        
+        local error_msg
+        if error_msg=$($validator "$value" 2>&1); then
+            echo "$value"
+            return 0
+        else
+            print_error "$error_msg"
+            echo ""
+        fi
+    done
+}
+
+read_yes_no() {
+    local prompt="$1"
+    local default="${2:-n}"
+    
+    while true; do
+        if [ "$default" = "y" ]; then
+            echo -n "$prompt (Y/n): "
+        else
+            echo -n "$prompt (y/N): "
+        fi
+        
+        read answer
+        
+        if [ -z "$answer" ]; then
+            answer="$default"
+        fi
+        
+        case "$answer" in
+            [Yy]|[Yy][Ee][Ss])
+                return 0
+                ;;
+            [Nn]|[Nn][Oo])
+                return 1
+                ;;
+            *)
+                print_error "请输入 y 或 n"
+                ;;
+        esac
+    done
+}
+
+# 配置保存
+load_services_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        cat "$CONFIG_FILE"
+    else
+        echo "{}"
+    fi
+}
+
+save_service_config() {
+    local service_name=$1
+    local config=$2
+    
+    local current_config=$(load_services_config)
+    local new_config=$(echo "$current_config" | jq --arg name "$service_name" --argjson service "$config" '.[$name] = $service')
+    
+    echo "$new_config" | jq '.' > "$CONFIG_FILE"
+}
+
+# 模板处理
+replace_template_vars() {
+    local file=$1
+    local service_name=$2
+    local service_name_upper=$3
+    local database_name=$4
+    local api_port=$5
+    local rpc_port=$6
+    local prometheus_api_port=$7
+    local prometheus_rpc_port=$8
+    local db_host=$9
+    local redis_host=${10}
+    local core_rpc_target=${11}
+    
+    if file "$file" | grep -q "binary"; then
+        return
+    fi
+    
+    sed -i.bak \
+        -e "s/{{SERVICE_NAME}}/$service_name/g" \
+        -e "s/{{SERVICE_NAME_UPPER}}/$service_name_upper/g" \
+        -e "s/{{DATABASE_NAME}}/$database_name/g" \
+        -e "s/{{API_PORT}}/$api_port/g" \
+        -e "s/{{RPC_PORT}}/$rpc_port/g" \
+        -e "s/{{PROMETHEUS_API_PORT}}/$prometheus_api_port/g" \
+        -e "s/{{PROMETHEUS_RPC_PORT}}/$prometheus_rpc_port/g" \
+        -e "s/{{DB_HOST}}/$db_host/g" \
+        -e "s/{{REDIS_HOST}}/$redis_host/g" \
+        -e "s/{{CORE_RPC_TARGET}}/$core_rpc_target/g" \
+        "$file"
+    
+    rm -f "$file.bak"
+}
+
+rename_service_files() {
+    local target_dir=$1
+    local service_name=$2
+    
+    # 重命名主要文件
+    [ -f "$target_dir/api/io.go" ] && mv "$target_dir/api/io.go" "$target_dir/api/$service_name.go"
+    [ -f "$target_dir/rpc/io.go" ] && mv "$target_dir/rpc/io.go" "$target_dir/rpc/$service_name.go"
+    
+    # 重命名配置文件
+    [ -f "$target_dir/api/etc/io.yaml" ] && mv "$target_dir/api/etc/io.yaml" "$target_dir/api/etc/$service_name.yaml"
+    [ -f "$target_dir/rpc/etc/io.yaml" ] && mv "$target_dir/rpc/etc/io.yaml" "$target_dir/rpc/etc/$service_name.yaml"
+    
+    # 重命名其他关键文件
+    [ -f "$target_dir/rpc/internal/server/io_server.go" ] && mv "$target_dir/rpc/internal/server/io_server.go" "$target_dir/rpc/internal/server/${service_name}_server.go"
+    
+    if [ -d "$target_dir/rpc/ioclient" ]; then
+        mv "$target_dir/rpc/ioclient" "$target_dir/rpc/${service_name}client"
+        [ -f "$target_dir/rpc/${service_name}client/io.go" ] && mv "$target_dir/rpc/${service_name}client/io.go" "$target_dir/rpc/${service_name}client/$service_name.go"
+    fi
+    
+    # 重命名ent文件
+    [ -f "$target_dir/rpc/ent/io.go" ] && mv "$target_dir/rpc/ent/io.go" "$target_dir/rpc/ent/$service_name.go"
+    [ -f "$target_dir/rpc/ent/io_create.go" ] && mv "$target_dir/rpc/ent/io_create.go" "$target_dir/rpc/ent/${service_name}_create.go"
+    [ -f "$target_dir/rpc/ent/io_update.go" ] && mv "$target_dir/rpc/ent/io_update.go" "$target_dir/rpc/ent/${service_name}_update.go"
+    [ -f "$target_dir/rpc/ent/io_delete.go" ] && mv "$target_dir/rpc/ent/io_delete.go" "$target_dir/rpc/ent/${service_name}_delete.go"
+    [ -f "$target_dir/rpc/ent/io_query.go" ] && mv "$target_dir/rpc/ent/io_query.go" "$target_dir/rpc/ent/${service_name}_query.go"
+    
+    # 重命名目录
+    if [ -d "$target_dir/rpc/ent/io" ]; then
+        mv "$target_dir/rpc/ent/io" "$target_dir/rpc/ent/$service_name"
+        [ -f "$target_dir/rpc/ent/$service_name/io.go" ] && mv "$target_dir/rpc/ent/$service_name/io.go" "$target_dir/rpc/ent/$service_name/$service_name.go"
+    fi
+    
+    # 重命名proto和types
+    [ -f "$target_dir/rpc/io.proto" ] && mv "$target_dir/rpc/io.proto" "$target_dir/rpc/$service_name.proto"
+    
+    if [ -d "$target_dir/rpc/types/io" ]; then
+        mv "$target_dir/rpc/types/io" "$target_dir/rpc/types/$service_name"
+        [ -f "$target_dir/rpc/types/$service_name/io.pb.go" ] && mv "$target_dir/rpc/types/$service_name/io.pb.go" "$target_dir/rpc/types/$service_name/$service_name.pb.go"
+        [ -f "$target_dir/rpc/types/$service_name/io_grpc.pb.go" ] && mv "$target_dir/rpc/types/$service_name/io_grpc.pb.go" "$target_dir/rpc/types/$service_name/${service_name}_grpc.pb.go"
+    fi
+}
+
+# 主要流程
+main() {
+    # 检查依赖
+    command -v jq >/dev/null 2>&1 || { 
+        print_error "需要安装 jq 工具"
+        echo "Ubuntu/Debian: sudo apt install jq"
+        echo "CentOS/RHEL:   sudo yum install jq"
+        echo "macOS:         brew install jq"
+        exit 1
+    }
+    
+    if [ ! -d "$TEMPLATE_DIR" ]; then
+        print_error "模板目录不存在: $TEMPLATE_DIR"
+        exit 1
+    fi
+    
+    print_header
+    
+    echo -e "${BOLD}${ROCKET} 欢迎使用 NewBee 引导式服务创建器！${NC}"
+    echo ""
+    echo "本工具将引导您快速创建一个完整的微服务，包括："
+    echo "• REST API 服务层"
+    echo "• gRPC RPC 服务层" 
+    echo "• 数据库集成 (MySQL + Redis)"
+    echo "• 多租户和权限管理"
+    echo "• 监控和日志"
+    echo ""
+    
+    if ! read_yes_no "准备开始创建吗？" "y"; then
+        echo ""
+        print_info "已取消，欢迎下次使用！"
+        exit 0
+    fi
+    
+    echo ""
+    print_step 1 "服务名称"
+    echo "请为您的微服务选择一个名称。"
+    echo -e "${DIM}命名规则: 小写字母开头，可包含字母、数字、连字符，长度 2-20${NC}"
+    echo -e "${DIM}示例: user, order, product, user-service${NC}"
+    echo ""
+    
+    SERVICE_NAME=$(read_with_validation "请输入服务名称" "validate_service_name")
+    
+    # 检查是否已存在
+    local target_dir="$PROJECT_ROOT/$SERVICE_NAME"
+    if [ -d "$target_dir" ]; then
+        echo ""
+        print_info "服务 '$SERVICE_NAME' 已存在"
+        if read_yes_no "是否覆盖现有服务？" "n"; then
+            rm -rf "$target_dir"
+            print_success "已删除现有服务"
+        else
+            print_info "请选择其他服务名称"
+            exit 0
+        fi
+    fi
+    
+    echo ""
+    print_success "服务名称: $SERVICE_NAME"
+    
+    echo ""
+    print_step 2 "数据库配置"
+    echo "配置数据库连接信息 (支持 MySQL/PostgreSQL)"
+    echo ""
+    
+    local default_db_name="newbee_$SERVICE_NAME"
+    DATABASE_NAME=$(read_with_validation "数据库名称" "" "$default_db_name")
+    DB_HOST=$(read_with_validation "数据库主机地址" "" "$DB_HOST")
+    
+    print_success "数据库: $DATABASE_NAME @ $DB_HOST"
+    
+    echo ""
+    print_step 3 "缓存配置"
+    echo "配置 Redis 缓存服务"
+    echo ""
+    
+    REDIS_HOST=$(read_with_validation "Redis 地址 (格式: host:port)" "" "$REDIS_HOST")
+    
+    print_success "Redis: $REDIS_HOST"
+    
+    echo ""
+    print_step 4 "端口配置"
+    echo "为服务分配网络端口"
+    echo ""
+    
+    local suggested_api_port=$(get_available_port 9600)
+    API_PORT=$(read_with_validation "API 端口" "validate_port" "$suggested_api_port")
+    
+    local suggested_rpc_port=$((${API_PORT} + 1))
+    RPC_PORT=$(read_with_validation "RPC 端口" "validate_port" "$suggested_rpc_port")
+    
+    print_success "端口: API=$API_PORT, RPC=$RPC_PORT"
+    
+    echo ""
+    print_step 5 "配置确认"
+    echo "请确认以下配置信息："
+    echo ""
+    echo -e "${CYAN}┌─ 服务配置 ──────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│${NC} 服务名称: ${BOLD}$SERVICE_NAME${NC}"
+    echo -e "${CYAN}│${NC} 数据库:   ${BOLD}$DATABASE_NAME${NC} @ ${BOLD}$DB_HOST${NC}"
+    echo -e "${CYAN}│${NC} Redis:    ${BOLD}$REDIS_HOST${NC}"
+    echo -e "${CYAN}│${NC} API端口:  ${BOLD}$API_PORT${NC} (http://localhost:$API_PORT)"
+    echo -e "${CYAN}│${NC} RPC端口:  ${BOLD}$RPC_PORT${NC} (grpc://localhost:$RPC_PORT)"
+    echo -e "${CYAN}└─────────────────────────────────────────────────────┘${NC}"
+    echo ""
+    
+    if ! read_yes_no "确认创建服务？" "y"; then
+        print_info "已取消创建"
+        exit 0
+    fi
+    
+    echo ""
+    print_step 6 "创建服务"
+    echo "正在生成您的微服务..."
+    echo ""
+    
+    local service_name_upper=$(echo "$SERVICE_NAME" | tr '[:lower:]' '[:upper:]')
+    local prometheus_api_port=$((${API_PORT} + 100))
+    local prometheus_rpc_port=$((${RPC_PORT} + 100))
+    
+    echo -n "• 复制服务模板... "
+    cp -r "$TEMPLATE_DIR" "$target_dir"
+    echo -e "${GREEN}完成${NC}"
+    
+    echo -n "• 处理模板变量... "
+    find "$target_dir" -type f | while read file; do
+        replace_template_vars "$file" "$SERVICE_NAME" "$service_name_upper" "$DATABASE_NAME" \
+            "$API_PORT" "$RPC_PORT" "$prometheus_api_port" "$prometheus_rpc_port" \
+            "$DB_HOST" "$REDIS_HOST" "$CORE_RPC_TARGET"
+    done
+    echo -e "${GREEN}完成${NC}"
+    
+    echo -n "• 重命名服务文件... "
+    rename_service_files "$target_dir" "$SERVICE_NAME"
+    echo -e "${GREEN}完成${NC}"
+    
+    echo -n "• 设置文件权限... "
+    chmod +x "$target_dir/api/$SERVICE_NAME.go" 2>/dev/null || true
+    chmod +x "$target_dir/rpc/$SERVICE_NAME.go" 2>/dev/null || true
+    echo -e "${GREEN}完成${NC}"
+    
+    echo -n "• 保存服务配置... "
+    local service_config=$(cat << EOF
+{
+    "name": "$SERVICE_NAME",
+    "database": "$DATABASE_NAME",
+    "db_host": "$DB_HOST",
+    "redis_host": "$REDIS_HOST",
+    "api_port": $API_PORT,
+    "rpc_port": $RPC_PORT,
+    "prometheus_api_port": $prometheus_api_port,
+    "prometheus_rpc_port": $prometheus_rpc_port,
+    "core_rpc_target": "$CORE_RPC_TARGET",
+    "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+    "path": "$target_dir"
+}
+EOF
+    )
+    save_service_config "$SERVICE_NAME" "$service_config"
+    echo -e "${GREEN}完成${NC}"
+    
+    echo ""
+    echo -e "${GREEN}${BOLD}🎉 服务 '$SERVICE_NAME' 创建成功！${NC}"
+    echo ""
+    
+    echo -e "${BOLD}${ROCKET} 服务访问地址:${NC}"
+    echo "  API:        http://localhost:$API_PORT"
+    echo "  RPC:        grpc://localhost:$RPC_PORT"
+    echo "  Prometheus: http://localhost:$prometheus_api_port (API)"
+    echo "              http://localhost:$prometheus_rpc_port (RPC)"
+    echo ""
+    
+    echo -e "${BOLD}${INFO} 下一步操作:${NC}"
+    echo ""
+    echo -e "${YELLOW}1. 进入服务目录${NC}"
+    echo "   cd $SERVICE_NAME"
+    echo ""
+    echo -e "${YELLOW}2. 定义数据模型${NC}"
+    echo "   编辑 rpc/ent/schema/ 目录下的文件"
+    echo ""
+    echo -e "${YELLOW}3. 定义 API 接口${NC}"
+    echo "   编辑 api/desc/ 目录下的 .api 文件"
+    echo ""
+    echo -e "${YELLOW}4. 生成和启动${NC}"
+    echo "   # 生成数据库代码"
+    echo "   cd rpc && go run entgo.io/ent/cmd/ent generate ./ent/schema"
+    echo ""
+    echo "   # 生成 API 代码"
+    echo "   cd ../api && goctl api go -api desc/*.api -dir ."
+    echo ""
+    echo "   # 启动服务"
+    echo "   cd ../rpc && go run .  # 启动 RPC 服务"
+    echo "   cd ../api && go run .  # 启动 API 服务 (新终端)"
+    echo ""
+    
+    echo -e "${BOLD}${DATABASE} 有用的命令:${NC}"
+    echo "   ./newbee-service list      # 查看所有服务"
+    echo "   ./newbee-service info $SERVICE_NAME  # 查看服务详情"
+    echo ""
+    
+    read -p "按回车键退出..."
+}
+
+# 运行主函数
+main "$@"

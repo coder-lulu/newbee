@@ -1,0 +1,249 @@
+# Newbee CMDB Project
+
+## Project Overview
+
+This is a Go-based monorepo for a CMDB (Configuration Management Database) system. It is composed of several services, including a `cmdb-api` and `cmdb-rpc`, a `common` library, a `core` service, and a `ui` directory, which suggests a web-based frontend. The project uses a variety of technologies, including Go, go-zero, Ent, Casbin, gRPC, and Protocol Buffers. The database is MySQL.
+
+The project is organized as a Go workspace, with the following modules:
+
+*   `cmdb/api`: The API gateway for the CMDB system.
+*   `cmdb/rpc`: The gRPC service for the CMDB system.
+*   `common`: A shared library used by all services.
+*   `core`: The core business logic of the CMDB system.
+*   `ui`: A Vue.js-based web frontend.
+
+## NewBee 编码准则
+
+本文档规定了项目开发的核心准则，确保代码质量、一致性和可维护性。
+
+### 1. 核心开发流程
+
+#### 1.1 数据模型与RPC接口变更流程（强制遵循）
+
+**步骤顺序**：
+1. **修改 ent Schema** → 2. **生成 ent 代码** → 3. **生成 RPC 代码**
+
+```bash
+# 步骤1: 修改 rpc/ent/schema/ 目录下的schema文件
+# 步骤2: 生成ent代码
+go run entgo.io/ent/cmd/ent generate --template glob="./ent/template/*.tmpl" ./ent/schema --feature sql/execquery,intercept,sql/modifier
+
+# 步骤3: 生成RPC代码  
+make gen-rpc
+```
+
+**重要提醒**：
+- 租户相关数据必须使用 `TenantMixin`
+- 绕过此流程的变更不被允许
+
+---
+
+### 2. 多租户架构准则
+
+#### 2.1 新服务接入要求
+
+**必要步骤**：
+1. **导入公共库**：`github.com/coder-lulu/newbee-common`
+2. **Schema配置**：业务实体必须包含 `mixins.TenantMixin{}`
+3. **服务初始化**：注册租户Hook和拦截器
+4. **API保护**：使用 `TenantCheck` 中间件
+5. **系统操作**：使用 `hooks.NewSystemContext()` 处理全局操作
+
+**ServiceContext初始化模板**：
+```go
+import "github.com/coder-lulu/newbee-common/orm/ent/hooks"
+
+db := ent.NewClient(...)
+// 必须注册
+db.Use(hooks.TenantMutationHook())
+db.Intercept(hooks.TenantQueryInterceptor())
+```
+
+**API定义模板**：
+```go
+@server(
+    jwt: Auth
+    middleware: Authority,TenantCheck  // 必须包含TenantCheck
+)
+```
+
+#### 2.2 租户安全编码规范
+
+##### 核心安全准则
+**禁止**：
+- ❌ 使用原生SQL绕过ent的Hook机制
+- ❌ 直接操作`tenant_id`字段
+- ❌ 在业务逻辑中手动添加租户过滤条件
+- ❌ 缓存跨租户的敏感数据
+
+**必须**：
+- ✅ 所有数据库操作通过ent进行
+- ✅ 依赖底层Hook实现自动租户隔离
+- ✅ 系统级操作使用SystemContext
+- ✅ 敏感操作记录审计日志
+
+##### Schema设计规范
+```go
+// ✅ 正确示例
+func (BusinessEntity) Mixin() []ent.Mixin {
+    return []ent.Mixin{
+        mixins.IDMixin{},
+        mixins.StatusMixin{},
+        mixins.TenantMixin{}, // 必须包含
+    }
+}
+
+// ❌ 错误示例：缺少TenantMixin - 安全漏洞！
+func (BusinessEntity) Mixin() []ent.Mixin {
+    return []ent.Mixin{
+        mixins.IDMixin{},
+        mixins.StatusMixin{},
+        // 缺少TenantMixin
+    }
+}
+```
+
+##### 数据操作规范
+```go
+// ✅ 正确的业务查询
+users, err := l.svcCtx.DB.User.Query().Where(user.StatusEQ(1)).All(l.ctx)
+
+// ✅ 正确的系统操作
+systemCtx := hooks.NewSystemContext(l.ctx)
+err := l.svcCtx.DB.Role.Create().SetName("admin").Exec(systemCtx)
+
+// ❌ 严禁原生SQL
+err := l.svcCtx.DB.Driver().Query("SELECT * FROM users WHERE tenant_id = ?", tenantID)
+```
+
+### 3. 数据权限架构准则
+
+#### 3.1 新服务数据权限接入
+
+**必要步骤**：
+1. **导入数据权限库**：`github.com/coder-lulu/newbee-common/orm/ent/hooks`
+2. **API中间件**：添加 `DataPerm` 中间件
+3. **注册拦截器**：使用 `RegisterDataPermissionInterceptorsWithTenant`
+4. **表字段要求**：包含 `department_id`, `user_id`, `tenant_id`
+5. **权限范围**：支持五级数据权限（All, CustomDept, OwnDeptAndSub, OwnDept, Self）
+
+**初始化模板**：
+```go
+import "github.com/coder-lulu/newbee-common/orm/ent/hooks"
+
+// RPC服务中注册拦截器
+hooks.RegisterDataPermissionInterceptorsWithTenant(db, 
+    "users", "departments", "positions", "roles")
+
+// API服务中添加中间件
+@server(
+    jwt: Auth
+    middleware: Authority,TenantCheck,DataPerm  // 必须包含DataPerm
+)
+```
+
+**详细集成说明**：参见 `data_permission_integration_guide.md`
+
+### 4. 测试要求
+
+#### 4.1 必须包含的测试
+- [ ] 租户隔离测试
+- [ ] 数据权限隔离测试  
+- [ ] SystemContext权限测试
+- [ ] API安全测试
+- [ ] 性能基准测试
+
+#### 4.2 测试模板
+```go
+// 租户隔离测试
+func TestTenantIsolation(t *testing.T) {
+    ctxA := context.WithValue(context.Background(), "tenantId", uint64(1))
+    ctxB := context.WithValue(context.Background(), "tenantId", uint64(2))
+    
+    entityA, err := client.Entity.Create().SetName("test").Save(ctxA)
+    require.NoError(t, err)
+    
+    entities, err := client.Entity.Query().All(ctxB)
+    require.NoError(t, err)
+    assert.Empty(t, entities) // 租户B看不到租户A的数据
+}
+```
+
+### 5. 性能与监控规范
+
+#### 5.1 性能优化
+- 合理使用 `tenant_id` 和 `department_id` 索引
+- 避免跨租户的复杂JOIN查询
+- 控制SystemContext使用频率
+- 优化租户级别和权限级别的缓存策略
+
+#### 5.2 监控指标
+- 租户数据隔离违规次数
+- 数据权限违规次数
+- SystemContext使用频率和来源
+- 异常的跨租户/跨权限访问尝试
+
+### 6. 发布前检查清单
+
+#### 6.1 Schema检查
+- [ ] 业务实体使用了TenantMixin
+- [ ] 数据权限相关表包含必要字段
+- [ ] 系统级实体有明确的排除说明
+
+#### 6.2 代码检查  
+- [ ] 正确注册租户和数据权限拦截器
+- [ ] 无原生SQL绕过Hook机制
+- [ ] SystemContext使用有合理性说明
+- [ ] API包含必要的安全中间件
+
+#### 6.3 测试检查
+- [ ] 租户隔离测试100%通过
+- [ ] 数据权限隔离测试通过
+- [ ] 性能测试满足要求
+- [ ] 安全扫描无高危问题
+
+#### 6.4 违规后果
+- 发现安全违规的代码必须立即回滚
+- 相关开发人员必须重新学习安全规范
+- 严重违规行为将影响绩效考核
+
+---
+
+### 参考文档
+
+- 多租户集成详细指南：`多租户集成指南.md`
+- 数据权限集成详细指南：`数据权限集成指南.md`
+- 公共库使用说明：`github.com/coder-lulu/newbee-common`
+
+## Building and Running
+
+### Backend
+
+The backend services are built using `make`. Each service has its own `Makefile` with the following common targets:
+
+*   `make build-linux`: Build the service for Linux.
+*   `make test`: Run the tests for the service.
+*   `make lint`: Lint the code.
+*   `make docker`: Build a Docker image for the service.
+
+To build a specific service, navigate to its directory and run the desired `make` command. For example, to build the `cmdb-api` service for Linux, run the following command:
+
+```bash
+cd cmdb/api
+make build-linux
+```
+
+### Frontend
+
+The frontend is a Vue.js project managed with `pnpm` and `turbo`. The following commands are available in the `ui` directory:
+
+*   `pnpm dev`: Start the development server.
+*   `pnpm build`: Build the application for production.
+*   `pnpm test:unit`: Run the unit tests.
+
+To start the frontend development server, run the following command:
+
+```bash
+cd ui
+pnpm dev
+```

@@ -1,0 +1,28 @@
+{
+  "ultrathink": {
+    "name": "ultrathink",
+    "database": "newbee_ultrathink",
+    "db_host": "192.168.26.130",
+    "redis_host": "192.168.26.130:6380",
+    "api_port": 9800,
+    "rpc_port": 9801,
+    "prometheus_api_port": 9900,
+    "prometheus_rpc_port": 9901,
+    "core_rpc_target": "127.0.0.1:9101",
+    "created_at": "2025-09-23T17:26:57Z",
+    "path": "/opt/code/newbee/ultrathink"
+  },
+  "testservice": {
+    "name": "testservice",
+    "database": "newbee_testservice",
+    "db_host": "192.168.26.130",
+    "redis_host": "192.168.26.130:6380",
+    "api_port": 9600,
+    "rpc_port": 9601,
+    "prometheus_api_port": 9700,
+    "prometheus_rpc_port": 9701,
+    "core_rpc_target": "127.0.0.1:9101",
+    "created_at": "2025-09-23T17:38:15Z",
+    "path": "/opt/code/newbee/testservice"
+  }
+}

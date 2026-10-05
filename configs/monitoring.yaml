@@ -1,0 +1,30 @@
+monitoring:
+  prometheus:
+    enabled: true
+    scrape_interval: 15s
+    metrics_path: /metrics
+    port: 9090
+
+  opentelemetry:
+    enabled: true
+    collector_endpoint: localhost:4317
+    sampling_rate: 0.1
+
+  alerts:
+    high_failure_rate_threshold: 0.1
+    high_latency_threshold: 500ms
+    security_violation_threshold: 5
+
+  cache:
+    hit_rate_threshold: 0.7
+    size_warning_threshold: 9000
+
+  alerting_channels:
+    email:
+      - admin@company.com
+      - security@company.com
+    slack:
+      - "#security-alerts"
+      - "#performance-monitoring"
+    pagerduty:
+      service_key: "your-pagerduty-key"

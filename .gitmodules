@@ -1,0 +1,36 @@
+[submodule "common"]
+	path = common
+	url = https://github.com/coder-lulu/newbee-common.git
+[submodule "core"]
+	path = core
+	url = https://github.com/coder-lulu/newbee-core.git
+[submodule "nb-agent"]
+	path = nb-agent
+	url = https://github.com/coder-lulu/nb-agent.git
+[submodule "ops-center"]
+	path = ops-center
+	url = https://github.com/coder-lulu/newbee-ops.git
+[submodule "ui"]
+	path = ui
+	url = https://github.com/coder-lulu/newbee-ui.git
+[submodule "cmdb/api"]
+	path = cmdb/api
+	url = https://github.com/coder-lulu/newbee-cmdb-api.git
+[submodule "cmdb/rpc"]
+	path = cmdb/rpc
+	url = https://github.com/coder-lulu/newbee-cmdb-rpc.git
+[submodule "newbee-proxy"]
+	path = newbee-proxy
+	url = https://github.com/coder-lulu/newbee-proxy.git
+[submodule "unified-io"]
+	path = unified-io
+	url = https://github.com/coder-lulu/newbee-io.git
+[submodule "job"]
+	path = job
+	url = https://github.com/coder-lulu/newbee-job.git
+[submodule "packages/asset-selector-sdk"]
+	path = packages/asset-selector-sdk
+	url = https://github.com/coder-lulu/newbee-asset-selector-sdk.git
+[submodule "templates/service-template"]
+	path = templates/service-template
+	url = https://github.com/coder-lulu/newbee-service-template.git

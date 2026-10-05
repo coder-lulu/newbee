@@ -1,0 +1,15 @@
+go 1.25.1
+
+use (
+	./job
+	./unified-io
+	./cmdb/api
+	./cmdb/rpc
+	./common
+	./core
+	./newbee-proxy
+	./ops-center/api
+	./ops-center/rpc
+	./unified-io/api
+	./unified-io/rpc
+)
